@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use reqwest::Client;
+use sqlx::types::Json;
+use sqlx::PgPool;
 
 use super::Governor;
 use crate::backoff;
@@ -9,7 +11,12 @@ use crate::models::movie_credits::MovieCreditsResponse;
 use crate::models::movie_details::MovieDetailsResponse;
 
 #[inline]
-pub async fn fetch_movie_details(client: &Client, governor: &Governor, id: u32) -> Result<MovieDetailsResponse> {
+pub async fn fetch_movie_details(
+	client: &Client,
+	db: &PgPool,
+	governor: &Governor,
+	id: u32,
+) -> Result<MovieDetailsResponse> {
 	// wait until we are let through!
 	while governor.check().is_err() {}
 
@@ -27,18 +34,29 @@ pub async fn fetch_movie_details(client: &Client, governor: &Governor, id: u32) 
 		return Err(anyhow::anyhow!("failed to fetch movie details for id {}", id));
 	}
 
-	serde_json::from_str::<_>(&text).map_err(|e| {
-		tracing::error!("failed to fetch movie details for id {}: {}", id, e);
-		e.into()
-	})
+	let json: MovieDetailsResponse = serde_json::from_str::<_>(&text)?;
+
+	sqlx::query!(
+		r#"insert into movie_details(id, data) values ($1, $2) on conflict do nothing;"#,
+		id as i32,
+		Json(&json) as _
+	)
+	.execute(db)
+	.await?;
+
+	Ok(json)
 }
 
 #[inline]
-pub async fn fetch_movie_credits(client: &Client, governor: &Governor, id: u32) -> Result<MovieCreditsResponse> {
+pub async fn fetch_movie_credits(
+	client: &Client,
+	db: &PgPool,
+	governor: &Governor,
+	id: u32,
+) -> Result<MovieCreditsResponse> {
 	// wait until we are let through!
 	while governor.check().is_err() {}
 
-	let mut res = None;
 	for multiplier in backoff::new().take(10) {
 		let response = client
 			.get(format!("https://api.themoviedb.org/3/movie/{}/credits", id))
@@ -57,22 +75,19 @@ pub async fn fetch_movie_credits(client: &Client, governor: &Governor, id: u32) 
 			);
 			tokio::time::sleep(dur).await;
 		} else {
-			match serde_json::from_str::<_>(&text) {
-				Ok(r) => {
-					res = Some(r);
-					break;
-				}
-				Err(e) => {
-					tracing::error!("failed to fetch movie credits for id {}: {}", id, e);
-					return Err(e.into());
-				}
-			}
+			let json: MovieCreditsResponse = serde_json::from_str::<_>(&text)?;
+
+			sqlx::query!(
+				r#"insert into movie_credits(id, data) values ($1, $2) on conflict do nothing;"#,
+				id as i32,
+				Json(&json) as _
+			)
+			.execute(db)
+			.await?;
+
+			return Ok(json);
 		}
 	}
 
-	if let None = res {
-		return Err(anyhow::anyhow!("failed to fetch movie credits for id {}", id));
-	} else {
-		return Ok(res.unwrap());
-	}
+	Err(anyhow::anyhow!("failed to fetch movie credits for id {}", id))
 }

@@ -14,7 +14,6 @@ use sixdkb::fetchers::movie::{fetch_movie_credits, fetch_movie_details};
 use sixdkb::{create_tmdb_client, parsers};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::{fmt, EnvFilter, Registry};
 
@@ -35,8 +34,8 @@ async fn main() -> Result<()> {
 	opts = opts.application_name(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")));
 
 	let pool = PgPoolOptions::new()
-		.max_connections(500)
-		.min_connections(100)
+		.max_connections(70)
+		.min_connections(10)
 		.acquire_timeout(Duration::from_secs(8))
 		.idle_timeout(Duration::from_secs(8))
 		.max_lifetime(None);
@@ -47,8 +46,7 @@ async fn main() -> Result<()> {
 	let db = Arc::new(db);
 
 	let started = Instant::now();
-	let mut js = JoinSet::new();
-	let sem = Arc::new(Semaphore::new(50));
+	let sem = Arc::new(Semaphore::new(15));
 	// their limit is technically 50 per second but just to be safe (https://developer.themoviedb.org/docs/rate-limiting)
 	let governor = Arc::new(RateLimiter::direct(Quota::per_second(nonzero!(45u32))));
 
@@ -91,7 +89,9 @@ async fn main() -> Result<()> {
 
 			let position: i64 = pb.position().try_into().expect("infallible");
 			let index = position + start_index as i64;
-			let _ = update_progress(&db.clone(), index).await;
+			let _ = update_progress(&db, index).await;
+
+			db.close().await;
 
 			tracing::info!("Shutdown complete, saved progress (index: {index})");
 
@@ -99,8 +99,9 @@ async fn main() -> Result<()> {
 		}
 	});
 
+	let mut handles = vec![];
 	for movie in movies.into_iter().skip(start_index as usize) {
-		js.spawn({
+		handles.push(tokio::spawn({
 			let permit = sem.clone().acquire_owned().await?;
 			let tmdb_client = tmdb_client.clone();
 			let governor = governor.clone();
@@ -108,30 +109,27 @@ async fn main() -> Result<()> {
 			let pb = pb.clone();
 
 			async move {
-				let movie_details = fetch_movie_details(&tmdb_client, &governor, movie.id)
+				let movie_details = fetch_movie_details(&tmdb_client, &db, &governor, movie.id)
 					.await
 					.expect("failed to parse movie details");
-				let credits = fetch_movie_credits(&tmdb_client, &governor, movie.id)
+				let credits = fetch_movie_credits(&tmdb_client, &db, &governor, movie.id)
 					.await
 					.expect("failed to parse credits");
 				drop(permit);
 
-				let mut ts = db.begin().await.unwrap();
-
-				write_movie(&mut ts, movie_details)
+				let movie = write_movie(&db, &movie_details).await.expect("failed to write movie");
+				write_people(&db, &movie, credits)
 					.await
-					.expect("failed to write movie");
-
-				write_people(&mut ts, credits).await.expect("failed to write people");
-
-				ts.commit().await.expect("failed to commit transaction");
+					.expect("failed to write people");
 
 				pb.inc(1);
 			}
-		});
+		}));
 	}
 
-	while (js.join_next().await).is_some() {}
+	for handle in handles {
+		handle.await?;
+	}
 
 	pb.abandon_with_message(format!("{} Done in {}", SPARKLE, HumanDuration(started.elapsed())));
 

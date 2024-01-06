@@ -1,10 +1,10 @@
 use anyhow::Result;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::PgPool;
 
 use crate::models::movie_credits::MovieCreditsResponse;
 use crate::models::movie_details::MovieDetailsResponse;
 
-pub async fn write_movie(ts: &mut Transaction<'_, Postgres>, movie_details: MovieDetailsResponse) -> Result<()> {
+pub async fn write_movie(db: &PgPool, movie_details: &MovieDetailsResponse) -> Result<String> {
 	let movie_row = sqlx::query!(
 		r#"
 			insert into movie (
@@ -13,12 +13,7 @@ pub async fn write_movie(ts: &mut Transaction<'_, Postgres>, movie_details: Movi
 			) values ($1, $2, $3, $4, $5, $6)
 			on conflict(tmdb_id)
 			do update set
-				imdb_id = EXCLUDED.imdb_id,
-				title = EXCLUDED.title,
-				backdrop_path = EXCLUDED.backdrop_path,
-				poster_path = EXCLUDED.poster_path,
-				popularity = EXCLUDED.popularity,
-				updated_at = current_timestamp
+				popularity = EXCLUDED.popularity
 			returning movie_id;
 		"#,
 		movie_details.id,
@@ -28,22 +23,22 @@ pub async fn write_movie(ts: &mut Transaction<'_, Postgres>, movie_details: Movi
 		movie_details.poster_path,
 		movie_details.popularity,
 	)
-	.fetch_one(&mut **ts)
+	.fetch_one(db)
 	.await?;
 	let movie_id = movie_row.movie_id;
 
 	let _ = sqlx::query!("select from movie where movie_id = $1", movie_id)
-		.fetch_one(&mut **ts)
+		.fetch_one(db)
 		.await?;
 
-	Ok(())
+	Ok(movie_id)
 }
 
-pub async fn write_people(ts: &mut Transaction<'_, Postgres>, credits: MovieCreditsResponse) -> Result<()> {
+pub async fn write_people(db: &PgPool, movie_row_id: &String, credits: MovieCreditsResponse) -> Result<()> {
 	for cast in credits.cast {
 		let _ = insert_person(
-			ts,
-			&cast.id.to_string(),
+			db,
+			movie_row_id,
 			cast.id,
 			cast.name,
 			cast.profile_path,
@@ -55,8 +50,8 @@ pub async fn write_people(ts: &mut Transaction<'_, Postgres>, credits: MovieCred
 
 	for crew in credits.crew {
 		let _ = insert_person(
-			ts,
-			&crew.id.to_string(),
+			db,
+			movie_row_id,
 			crew.id,
 			crew.name,
 			crew.profile_path,
@@ -100,7 +95,7 @@ pub async fn fetch_start_index(db: &PgPool) -> Result<i64> {
 }
 
 pub async fn insert_person(
-	ts: &mut Transaction<'_, Postgres>,
+	db: &PgPool,
 	movie_row_id: &String,
 	person_id: i32,
 	name: String,
@@ -126,11 +121,11 @@ pub async fn insert_person(
 		profile_path,
 		popularity
 	)
-	.fetch_one(&mut **ts)
+	.fetch_one(db)
 	.await?;
 	let person_id = person_row.person_id;
 	let _ = sqlx::query!("select from person where person_id = $1", person_id)
-		.fetch_one(&mut **ts)
+		.fetch_one(db)
 		.await?;
 
 	let movie_role_row = sqlx::query!(
@@ -144,12 +139,12 @@ pub async fn insert_person(
 		person_id,
 		character_or_job
 	)
-	.fetch_one(&mut **ts)
+	.fetch_one(db)
 	.await?;
 
 	let role_id = movie_role_row.role_id;
 	let _ = sqlx::query!("select from movie_role where role_id = $1", role_id)
-		.fetch_one(&mut **ts)
+		.fetch_one(db)
 		.await?;
 
 	Ok(())
