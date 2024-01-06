@@ -1,0 +1,47 @@
+[tasks.lint]
+install_crate = "clippy"
+command = "cargo"
+args = ["clippy", "--tests", "--examples", "--all-targets", "--all-features"]
+
+[tasks.fmt]
+install_crate = "rustfmt"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.lint-ci]
+install_crate = "clippy"
+command = "cargo"
+args = [
+	"clippy",
+	"--tests",
+	"--examples",
+	"--all-targets",
+	"--all-features",
+	"--workspace",
+	"--",
+	"-D",
+	"warnings",
+]
+
+[tasks.fmt-ci]
+install_crate = "rustfmt"
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+
+# runs tests
+[tasks.test]
+env = { "RUN_MODE" = "test", "RUST_LOG" = "info", "RUST_BACKTRACE" = 0 }
+command = "cargo"
+args = [
+	"nextest",
+	"run",
+	"--examples",
+	"--all-targets",
+	"--all-features",
+	"${@}",
+]
+
+[tasks.test-ci]
+env = { "RUN_MODE" = "ci", "RUST_LOG" = "info" }
+command = "cargo"
+args = ["nextest", "run", "--examples", "--all-targets", "--all-features"]
